@@ -5,3 +5,5 @@
 
 /* automatic update UI */
 .update-banner{position:sticky;top:0;z-index:9999;display:flex;gap:.7rem;align-items:center;justify-content:center;padding:.75rem 1rem;background:#fff7cc;border-bottom:1px solid #e8ca57;box-shadow:0 2px 8px #0002}.update-banner[hidden]{display:none}.update-banner div{display:flex;flex-direction:column;line-height:1.25}.update-banner #updateVersion{font-size:.82rem;opacity:.75}.update-banner button{white-space:nowrap}@media(max-width:600px){.update-banner{flex-wrap:wrap}.update-banner div{width:100%;text-align:center}}
+
+.header-badges{display:flex;gap:.45rem;align-items:center;flex-wrap:wrap}.header-badges span{white-space:nowrap}#appVersion{background:rgba(255,255,255,.18);padding:.28rem .55rem;border-radius:999px;font-size:.78rem}.answer-provisional{font-size:.8rem;color:#92400e}
