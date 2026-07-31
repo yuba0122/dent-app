@@ -1,3 +1,4 @@
+const APP_VERSION='1.5.0', APP_BUILD='20260731-1530';
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs';
 const $=s=>document.querySelector(s), esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -156,4 +157,52 @@ function initCloud(){const u=localStorage.getItem('dentanki.supabaseUrl'),k=loca
 async function syncPull(){if(!sb)return;const {data:{user:u}}=await sb.auth.getUser();if(!u)return;user=u;$('#syncBadge').textContent='同期中';const [{data:c},{data:a}]=await Promise.all([sb.from('cards').select('*'),sb.from('attempts').select('*')]);if(c){const blocked=new Set(deletedCardIds),map=new Map(cards.map(x=>[x.id,x]));c.forEach(r=>{if(!blocked.has(r.id))map.set(r.id,r.data)});cards=[...map.values()]}if(a){const blocked=new Set(deletedAttemptIds),map=new Map(attempts.map(x=>[x.id,x]));a.forEach(r=>{if(!blocked.has(r.id)&&!deletedCardIds.includes(r.data?.cardId))map.set(r.id,r.data)});attempts=[...map.values()]}localStorage.setItem('dentanki.cards',JSON.stringify(cards));localStorage.setItem('dentanki.attempts',JSON.stringify(attempts));$('#syncBadge').textContent='同期済み';refresh()}
 let syncTimer;function syncPush(){clearTimeout(syncTimer);syncTimer=setTimeout(async()=>{if(!sb||!user)return;$('#syncBadge').textContent='同期中';try{if(deletedAttemptIds.length)await sb.from('attempts').delete().in('id',deletedAttemptIds);if(deletedCardIds.length)await sb.from('cards').delete().in('id',deletedCardIds);await Promise.all([cards.length?sb.from('cards').upsert(cards.map(x=>({id:x.id,user_id:user.id,data:x,updated_at:x.updatedAt||now()}))):Promise.resolve(),attempts.length?sb.from('attempts').upsert(attempts.map(x=>({id:x.id,user_id:user.id,data:x,updated_at:x.answeredAt||now()}))):Promise.resolve()]);deletedCardIds=[];deletedAttemptIds=[];localStorage.setItem('dentanki.deletedCardIds','[]');localStorage.setItem('dentanki.deletedAttemptIds','[]');$('#syncBadge').textContent='同期済み'}catch(e){console.error(e);$('#syncBadge').textContent='同期エラー'}},800)}
 $('#saveAI').onclick=()=>{localStorage.setItem('dentanki.aiEndpoint',$('#aiEndpoint').value);alert('保存しました')};
-tabs();$('#supabaseUrl').value=localStorage.getItem('dentanki.supabaseUrl')||'';$('#supabaseKey').value=localStorage.getItem('dentanki.supabaseKey')||'';$('#aiEndpoint').value=localStorage.getItem('dentanki.aiEndpoint')||'';initCloud();refresh();if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js');
+async function clearOldAppCaches(){
+  if(!('caches' in window))return;
+  const keys=await caches.keys();
+  await Promise.all(keys.filter(k=>k.startsWith('dentanki-')&&!k.includes(`${APP_VERSION}-${APP_BUILD}`)).map(k=>caches.delete(k)));
+}
+function showUpdate(version='最新版'){
+  const banner=$('#updateBanner');if(!banner)return;
+  $('#updateVersion').textContent=`現在 ${APP_VERSION} ／ 新版 ${version}`;
+  banner.hidden=false;
+}
+async function hardReloadToLatest(){
+  $('#applyUpdate').disabled=true;$('#applyUpdate').textContent='更新中…';
+  try{
+    const reg=await navigator.serviceWorker?.getRegistration();
+    if(reg?.waiting)reg.waiting.postMessage({type:'SKIP_WAITING'});
+    await clearOldAppCaches();
+    const url=new URL(location.href);url.searchParams.set('_update',Date.now());
+    location.replace(url.toString());
+  }catch(e){console.error(e);location.reload();}
+}
+async function checkForAppUpdate(){
+  try{
+    const res=await fetch(`./version.json?_=${Date.now()}`,{cache:'no-store',headers:{'cache-control':'no-cache'}});
+    if(!res.ok)return;
+    const remote=await res.json();
+    if(remote.build&&remote.build!==APP_BUILD)showUpdate(remote.version||remote.build);
+  }catch(e){console.debug('更新確認をスキップ',e);}
+}
+async function setupAutoUpdate(){
+  $('#applyUpdate').onclick=hardReloadToLatest;
+  $('#dismissUpdate').onclick=()=>{$('#updateBanner').hidden=true};
+  if(!('serviceWorker' in navigator)){checkForAppUpdate();return;}
+  let refreshing=false;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{if(refreshing)return;refreshing=true;location.reload()});
+  navigator.serviceWorker.addEventListener('message',e=>{
+    if(e.data?.type==='SW_ACTIVATED'&&e.data.build!==APP_BUILD)showUpdate(e.data.version||e.data.build);
+  });
+  const reg=await navigator.serviceWorker.register(`./sw.js?v=${APP_BUILD}`,{updateViaCache:'none'});
+  if(reg.waiting)showUpdate('ダウンロード済み');
+  reg.addEventListener('updatefound',()=>{
+    const worker=reg.installing;if(!worker)return;
+    worker.addEventListener('statechange',()=>{if(worker.state==='installed'&&navigator.serviceWorker.controller)showUpdate('ダウンロード済み')});
+  });
+  await reg.update().catch(()=>{});
+  await checkForAppUpdate();
+  setInterval(()=>{reg.update().catch(()=>{});checkForAppUpdate()},15*60*1000);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){reg.update().catch(()=>{});checkForAppUpdate()}});
+}
+tabs();$('#supabaseUrl').value=localStorage.getItem('dentanki.supabaseUrl')||'';$('#supabaseKey').value=localStorage.getItem('dentanki.supabaseKey')||'';$('#aiEndpoint').value=localStorage.getItem('dentanki.aiEndpoint')||'';initCloud();refresh();setupAutoUpdate();

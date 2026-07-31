@@ -2,3 +2,6 @@
 #ocrLog{white-space:pre-wrap;max-height:180px;overflow:auto;background:#f6faf9;border-radius:10px;padding:10px;font-size:12px;color:#526b68}details{margin-top:10px}summary{cursor:pointer;color:#0f766e}
 
 .bulkbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:white;padding:10px 12px;border-radius:12px;margin-bottom:10px}.bulkbar .checkline{display:flex;align-items:center;gap:7px;margin:0}.bulkbar input[type=checkbox],.cardcheck input{width:auto}.bulkbar #selectedCount{color:#617775;font-size:13px}.cardcheck{display:flex;align-items:center;gap:6px;margin:0 0 8px;font-size:13px;color:#0f766e}.question.selectable:has(.cardcheck input:checked){outline:3px solid #5eead4}.quiz-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.quiz-actions button{flex:1;min-width:140px}
+
+/* automatic update UI */
+.update-banner{position:sticky;top:0;z-index:9999;display:flex;gap:.7rem;align-items:center;justify-content:center;padding:.75rem 1rem;background:#fff7cc;border-bottom:1px solid #e8ca57;box-shadow:0 2px 8px #0002}.update-banner[hidden]{display:none}.update-banner div{display:flex;flex-direction:column;line-height:1.25}.update-banner #updateVersion{font-size:.82rem;opacity:.75}.update-banner button{white-space:nowrap}@media(max-width:600px){.update-banner{flex-wrap:wrap}.update-banner div{width:100%;text-align:center}}
