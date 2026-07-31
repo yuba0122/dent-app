@@ -1,5 +1,5 @@
-const CACHE_NAME='dentanki-1.5.0-20260731-1530';
-const APP_SHELL=['./','./index.html','./style.css?v=20260731-1530','./app.js?v=20260731-1530','./manifest.webmanifest?v=20260731-1530','./version.json'];
+const CACHE_NAME='dentanki-1.6.0-20260731-1625';
+const APP_SHELL=['./','./index.html','./style.css?v=20260731-1625','./app.js?v=20260731-1625','./manifest.webmanifest?v=20260731-1625','./version.json'];
 self.addEventListener('install',event=>{
   self.skipWaiting();
   event.waitUntil(caches.open(CACHE_NAME).then(cache=>cache.addAll(APP_SHELL)));
@@ -10,12 +10,12 @@ self.addEventListener('activate',event=>{
     await Promise.all(keys.filter(key=>key!==CACHE_NAME).map(key=>caches.delete(key)));
     await self.clients.claim();
     const clients=await self.clients.matchAll({type:'window',includeUncontrolled:true});
-    clients.forEach(client=>client.postMessage({type:'SW_ACTIVATED',version:'1.5.0',build:'20260731-1530'}));
+    clients.forEach(client=>client.postMessage({type:'SW_ACTIVATED',version:'1.6.0',build:'20260731-1625'}));
   })());
 });
 self.addEventListener('message',event=>{
   if(event.data?.type==='SKIP_WAITING')self.skipWaiting();
-  if(event.data?.type==='GET_VERSION')event.source?.postMessage({type:'SW_VERSION',version:'1.5.0',build:'20260731-1530'});
+  if(event.data?.type==='GET_VERSION')event.source?.postMessage({type:'SW_VERSION',version:'1.6.0',build:'20260731-1625'});
 });
 self.addEventListener('fetch',event=>{
   if(event.request.method!=='GET')return;

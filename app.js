@@ -1,4 +1,4 @@
-const APP_VERSION='1.5.0', APP_BUILD='20260731-1530';
+const APP_VERSION='1.6.0', APP_BUILD='20260731-1625';
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs';
 const $=s=>document.querySelector(s), esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -62,7 +62,11 @@ function normalizeOCRText(text){
     .replace(/[ \t]+/g,' ').replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n')
     .replace(/[|｜][|｜]+/g,'').replace(/([①-⑩])\s*[.．、]/g,'$1 ')
     .replace(/([A-Ea-eア-オ0-9])\s*[・･]/g,'$1. ')
-    .replace(/問\s+(\d+)/g,'問$1').trim()
+    .replace(/問\s+(\d+)/g,'問$1')
+    .replace(/(?:^|\n)\s*[Il|]\s*[.．、]\s*/g,'\n1. ')
+    .replace(/(?:^|\n)\s*[Oo]\s*[.．、]\s*/g,'\n0. ')
+    .replace(/([①-⑩A-Ea-eア-オ1-9])\s*[)）]\s*/g,'$1. ')
+    .trim()
 }
 function embeddedTextWithLines(tc){
   const items=(tc.items||[]).filter(i=>i.str&&i.str.trim()).map(i=>({str:i.str,x:i.transform?.[4]||0,y:i.transform?.[5]||0,h:Math.abs(i.height||i.transform?.[3]||10)}));
@@ -78,35 +82,97 @@ function detectVerticalGutter(canvas){
   return best.ink<.018?best.x:null
 }
 function cropCanvas(src,x,y,w,h){const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h);return c}
-async function recognizePass(worker,canvas,psm){await worker.setParameters({tessedit_pageseg_mode:String(psm),preserve_interword_spaces:'1',user_defined_dpi:'300'});const r=await worker.recognize(canvas);return normalizeOCRText(r.data.text||'')}
+async function recognizePass(worker,canvas,psm){
+  await worker.setParameters({
+    tessedit_pageseg_mode:String(psm),preserve_interword_spaces:'1',user_defined_dpi:'300',
+    tessedit_char_blacklist:'{}~`^',textord_tabfind_find_tables:'1'
+  });
+  const r=await worker.recognize(canvas);
+  return {text:normalizeOCRText(r.data.text||''),confidence:Number(r.data.confidence||0)}
+}
+function candidateScore(candidate){
+  if(!candidate)return -9999;
+  const q=splitQuestions(candidate.text||'').length;
+  const choiceLines=((candidate.text||'').split('\n').filter(x=>CHOICE_RE.test(x))).length;
+  return textQuality(candidate.text)+(candidate.confidence||0)*.8+q*90+Math.min(80,choiceLines*5)
+}
+function mergeEmbeddedAndOCR(embedded,ocr){
+  if(!embedded)return ocr;
+  if(!ocr)return embedded;
+  const eParts=splitQuestions(embedded),oParts=splitQuestions(ocr);
+  if(oParts.length>eParts.length)return ocr;
+  if(eParts.length>oParts.length)return embedded;
+  return textQuality(ocr)>textQuality(embedded)+25?ocr:embedded
+}
 async function highAccuracyOCR(canvas,layout='auto'){
   const worker=await getOCRWorker(),results=[];
   results.push(await recognizePass(worker,canvas,3));
-  if(layout!=='fast')results.push(await recognizePass(worker,canvas,6));
+  if(layout!=='fast'){
+    results.push(await recognizePass(worker,canvas,6));
+    // 疎な文字・図表混在ページ向け
+    results.push(await recognizePass(worker,canvas,11));
+  }
   const gutter=layout!=='single'?detectVerticalGutter(canvas):null;
   if(gutter){
     logOCR('2段組みを検出：左右を分けて再認識');
     const overlap=Math.round(canvas.width*.025),left=cropCanvas(canvas,0,0,Math.min(canvas.width,gutter+overlap),canvas.height),right=cropCanvas(canvas,Math.max(0,gutter-overlap),0,canvas.width-Math.max(0,gutter-overlap),canvas.height);
-    const lt=await recognizePass(worker,left,6),rt=await recognizePass(worker,right,6);results.push(lt+'\n'+rt);left.width=left.height=right.width=right.height=1
+    const lt=await recognizePass(worker,left,6),rt=await recognizePass(worker,right,6);
+    results.push({text:lt.text+'\n'+rt.text,confidence:(lt.confidence+rt.confidence)/2+4});
+    left.width=left.height=right.width=right.height=1
   }
-  return results.sort((a,b)=>textQuality(b)-textQuality(a))[0]||''
+  results.sort((a,b)=>candidateScore(b)-candidateScore(a));
+  return results[0]||{text:'',confidence:0}
 }
 async function extractText(page,mode,scale,fileName,pageNo,cleanupMode){
   const tc=await page.getTextContent({includeMarkedContent:true}),embedded=embeddedTextWithLines(tc);
-  const needsOCR=mode==='always'||(mode==='auto'&&(embedded.replace(/\s/g,'').length<45||textQuality(embedded)<35));
+  const embeddedQuestions=splitQuestions(embedded).length;
+  const embeddedChoices=embedded.split('\n').filter(x=>CHOICE_RE.test(x)).length;
+  const needsOCR=mode==='always'||(mode==='auto'&&(
+    embedded.replace(/\s/g,'').length<80||textQuality(embedded)<70||embeddedQuestions===0||embeddedChoices<2
+  ));
   if(!needsOCR||mode==='never')return{text:embedded,method:'文字情報'};
-  logOCR(`${fileName} ${pageNo}頁：高精度OCR開始`);
+  logOCR(`${fileName} ${pageNo}頁：ハイブリッド高精度OCR開始`);
   const canvas=await renderPageCanvas(page,scale,cleanupMode,$('#preprocessMode')?.value||'balanced');
-  const text=await highAccuracyOCR(canvas,$('#layoutMode')?.value||'auto');
-  logOCR(`${fileName} ${pageNo}頁：OCR完了（${text.length}文字、品質 ${Math.round(textQuality(text))}）`);canvas.width=canvas.height=1;
-  return{text,method:'高精度OCR'}
+  const result=await highAccuracyOCR(canvas,$('#layoutMode')?.value||'auto');
+  const text=mergeEmbeddedAndOCR(embedded,result.text);
+  const method=embedded&&text===embedded?'文字情報優先（OCR比較済み）':'ハイブリッド高精度OCR';
+  logOCR(`${fileName} ${pageNo}頁：OCR完了（${result.text.length}文字、信頼度 ${Math.round(result.confidence)}、品質 ${Math.round(textQuality(text))}）`);canvas.width=canvas.height=1;
+  return{text,method}
+}
+function inkBounds(canvas,pad=18){
+  const ctx=canvas.getContext('2d',{willReadFrequently:true}),w=canvas.width,h=canvas.height,d=ctx.getImageData(0,0,w,h).data;
+  let minX=w,minY=h,maxX=-1,maxY=-1;const sx=Math.max(1,Math.floor(w/900)),sy=Math.max(1,Math.floor(h/1200));
+  for(let y=0;y<h;y+=sy)for(let x=0;x<w;x+=sx){const i=(y*w+x)*4,lum=.299*d[i]+.587*d[i+1]+.114*d[i+2];if(lum<242){minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y)}}
+  if(maxX<0)return{x:0,y:0,w,h};
+  return{x:Math.max(0,minX-pad),y:Math.max(0,minY-pad),w:Math.min(w,maxX+pad)-Math.max(0,minX-pad),h:Math.min(h,maxY+pad)-Math.max(0,minY-pad)}
+}
+function canvasDataURL(canvas){const url=canvas.toDataURL('image/jpeg',.88);canvas.width=canvas.height=1;return url}
+async function questionImages(page,count,cleanupMode,layout='auto'){
+  if(count<=0)return[];
+  const full=await renderPageCanvas(page,1.15,cleanupMode,'none'),gutter=layout!=='single'?detectVerticalGutter(full):null,images=[];
+  const make=(x,y,w,h)=>{const c=cropCanvas(full,Math.max(0,Math.round(x)),Math.max(0,Math.round(y)),Math.max(1,Math.round(w)),Math.max(1,Math.round(h)));const b=inkBounds(c,24);const trimmed=cropCanvas(c,b.x,b.y,b.w,b.h);c.width=c.height=1;return canvasDataURL(trimmed)};
+  if(count===1){images.push(make(0,0,full.width,full.height));}
+  else if(gutter){
+    const leftN=Math.ceil(count/2),rightN=count-leftN,over=Math.round(full.width*.02);
+    for(let i=0;i<leftN;i++){const y=full.height*i/leftN,h=full.height/leftN;images.push(make(0,y,gutter+over,h));}
+    for(let i=0;i<rightN;i++){const y=full.height*i/rightN,h=full.height/rightN;images.push(make(gutter-over,y,full.width-gutter+over,h));}
+  }else{
+    for(let i=0;i<count;i++){const y=full.height*i/count,h=full.height/count;images.push(make(0,y,full.width,h));}
+  }
+  full.width=full.height=1;return images
 }
 const CHOICE_RE=/^\s*(?:([A-Ea-e])|([1-9])|([①②③④⑤⑥⑦⑧⑨⑩])|([ア-オ]))\s*[.．、:：)）]?\s*(.+?)\s*$/;
 const QUESTION_HEAD_RE=/^\s*(?:(?:問|Q)\s*\d{1,4}|\d{2,3}[A-D]\d{2,3}|第\s*\d+\s*問)\s*[.．、:：]?\s*/i;
 function parseChoices(text){
-  const lines=normalizeOCRText(text).split('\n'),choices=[],body=[];
-  for(const line of lines){const m=line.match(CHOICE_RE);if(m&&m[5]&&m[5].length>1)choices.push(m[5].trim());else body.push(line)}
-  return{body:body.join('\n').replace(/\n{3,}/g,'\n\n').trim(),choices}
+  const lines=normalizeOCRText(text).split('\n').map(x=>x.trim()).filter(Boolean),choices=[],body=[];let activeChoice=-1;
+  for(const line of lines){
+    const m=line.match(CHOICE_RE);
+    if(m&&m[5]&&m[5].length>1){choices.push(m[5].trim());activeChoice=choices.length-1;continue}
+    const continuation=activeChoice>=0&&!QUESTION_HEAD_RE.test(line)&&!/(正しい|誤って|どれか|選べ|該当する)[。．]?$/.test(line)&&line.length<90;
+    if(continuation){choices[activeChoice]+=' '+line;continue}
+    activeChoice=-1;body.push(line)
+  }
+  return{body:body.join('\n').replace(/\n{3,}/g,'\n\n').trim(),choices:choices.map(x=>x.replace(/\s{2,}/g,' ').trim())}
 }
 function isQuestionLike(block){
   const p=/正しい|誤っている|誤って|適切|不適切|どれか|選べ|選択せよ|組合せ|組み合わせ|該当する|最も/g.test(block);
@@ -139,7 +205,7 @@ function splitQuestions(raw){
   return fallback.filter(isQuestionLike)
 }
 $('#cancelExtract').onclick=()=>{cancelRequested=true;$('#status').textContent='中止処理中…'};
-$('#extractBtn').onclick=async()=>{const fs=[...$('#pdfInput').files];if(!fs.length)return alert('PDFを選択してください');cancelRequested=false;$('#cancelExtract').hidden=false;$('#extractBtn').disabled=true;$('#ocrLog').textContent='';let finishedPages=0,totalPages=0,added=0;try{const loaded=[];for(const f of fs){const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;loaded.push({f,pdf});totalPages+=pdf.numPages}for(const {f,pdf} of loaded){for(let p=1;p<=pdf.numPages;p++){if(cancelRequested)throw new Error('USER_CANCELLED');$('#status').textContent=`解析中：${f.name} ${p}/${pdf.numPages}頁`;const page=await pdf.getPage(p);const cleanupMode=$('#cleanupMode').value;const annotations=cleanupMode==='none'?[]:await page.getAnnotations({intent:'display'});if(annotations.length)logOCR(`${f.name} ${p}頁：PDF注釈 ${annotations.length}件を除外`);const {text,method}=await extractText(page,$('#ocrMode').value,Number($('#ocrScale').value),f.name,p,cleanupMode);const parts=splitQuestions(text);if(parts.length){const image=await pageImage(page,cleanupMode);for(const part of parts){const q=parseChoices(part);cards.push({id:crypto.randomUUID(),text:q.body,choices:q.choices,answer:'',explanation:'',subject:$('#importSubject').value||'未分類',tags:$('#importTags').value.split(',').map(x=>x.trim()).filter(Boolean),favorite:false,source:f.name,page:p,image,extractionMethod:method,correct:0,wrong:0,level:0,nextReview:now(),createdAt:now(),updatedAt:now()});added++}}finishedPages++;$('#progress').value=finishedPages/totalPages*100;await new Promise(r=>setTimeout(r,0))}}save();$('#status').textContent=`抽出完了：${added}件。問題一覧で内容と正答を確認してください。`}catch(e){if(e.message==='USER_CANCELLED'){$('#status').textContent=`処理を中止しました。抽出済み${added}件は保存しました。`;save()}else{console.error(e);$('#status').textContent='エラー：'+e.message;alert('PDF解析中にエラーが発生しました：'+e.message)}}finally{$('#cancelExtract').hidden=true;$('#extractBtn').disabled=false}};
+$('#extractBtn').onclick=async()=>{const fs=[...$('#pdfInput').files];if(!fs.length)return alert('PDFを選択してください');cancelRequested=false;$('#cancelExtract').hidden=false;$('#extractBtn').disabled=true;$('#ocrLog').textContent='';let finishedPages=0,totalPages=0,added=0;try{const loaded=[];for(const f of fs){const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;loaded.push({f,pdf});totalPages+=pdf.numPages}for(const {f,pdf} of loaded){for(let p=1;p<=pdf.numPages;p++){if(cancelRequested)throw new Error('USER_CANCELLED');$('#status').textContent=`解析中：${f.name} ${p}/${pdf.numPages}頁`;const page=await pdf.getPage(p);const cleanupMode=$('#cleanupMode').value;const annotations=cleanupMode==='none'?[]:await page.getAnnotations({intent:'display'});if(annotations.length)logOCR(`${f.name} ${p}頁：PDF注釈 ${annotations.length}件を除外`);const {text,method}=await extractText(page,$('#ocrMode').value,Number($('#ocrScale').value),f.name,p,cleanupMode);const parts=splitQuestions(text);if(parts.length){const images=await questionImages(page,parts.length,cleanupMode,$('#layoutMode')?.value||'auto');for(let pi=0;pi<parts.length;pi++){const q=parseChoices(parts[pi]);if(!q.body||q.choices.length<2)continue;cards.push({id:crypto.randomUUID(),text:q.body,choices:q.choices,answer:'',explanation:'',subject:$('#importSubject').value||'未分類',tags:$('#importTags').value.split(',').map(x=>x.trim()).filter(Boolean),favorite:false,source:f.name,page:p,image:images[pi]||'',extractionMethod:method,correct:0,wrong:0,level:0,nextReview:now(),createdAt:now(),updatedAt:now()});added++}}finishedPages++;$('#progress').value=finishedPages/totalPages*100;await new Promise(r=>setTimeout(r,0))}}save();$('#status').textContent=`抽出完了：${added}件。問題一覧で内容と正答を確認してください。`}catch(e){if(e.message==='USER_CANCELLED'){$('#status').textContent=`処理を中止しました。抽出済み${added}件は保存しました。`;save()}else{console.error(e);$('#status').textContent='エラー：'+e.message;alert('PDF解析中にエラーが発生しました：'+e.message)}}finally{$('#cancelExtract').hidden=true;$('#extractBtn').disabled=false}};
 function filteredCards(){const q=$('#search').value.toLowerCase(),sub=$('#subjectFilter').value,fil=$('#cardFilter').value;return cards.filter(c=>(!q||(c.text+' '+(c.tags||[]).join(' ')).toLowerCase().includes(q))&&(!sub||c.subject===sub)&&(fil==='all'||fil==='wrong'&&c.wrong>0||fil==='favorite'&&c.favorite||fil==='due'&&due(c)))}
 function updateBulkUI(list=filteredCards()){for(const id of [...selectedCardIds])if(!cards.some(c=>c.id===id))selectedCardIds.delete(id);const visibleIds=list.map(c=>c.id),checked=visibleIds.length>0&&visibleIds.every(id=>selectedCardIds.has(id));$('#selectAllCards').checked=checked;$('#selectAllCards').indeterminate=!checked&&visibleIds.some(id=>selectedCardIds.has(id));$('#selectedCount').textContent=`${selectedCardIds.size}件選択`;$('#bulkDelete').disabled=selectedCardIds.size===0}
 function renderCards(){const list=filteredCards();$('#cardList').innerHTML=list.map(c=>`<article class="question selectable"><label class="cardcheck"><input type="checkbox" data-card-select="${c.id}" ${selectedCardIds.has(c.id)?'checked':''}> 選択</label><div class="meta">${esc(c.subject)}・${esc(c.source||'手動')} ${c.page?'/ '+c.page+'頁':''}　正${c.correct} 誤${c.wrong}</div><h3>${esc(c.text)}</h3>${(c.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}<div class="actions"><button onclick="editCard('${c.id}')">編集</button><button onclick="toggleFav('${c.id}')">${c.favorite?'★':'☆'}</button><button onclick="deleteCard('${c.id}')">削除</button></div></article>`).join('')||'<div class="card">該当する問題はありません。</div>';document.querySelectorAll('[data-card-select]').forEach(x=>x.onchange=()=>{x.checked?selectedCardIds.add(x.dataset.cardSelect):selectedCardIds.delete(x.dataset.cardSelect);updateBulkUI(list)});updateBulkUI(list)}
